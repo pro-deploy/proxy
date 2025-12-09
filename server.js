@@ -181,6 +181,52 @@ function getAgentAccessId() {
   return AGENT_ACCESS_ID;
 }
 
+// Функция для обработки ответа от целевого API (проверяет на ошибки в теле ответа)
+function processTargetResponse(response, res) {
+  console.log(`Response status: ${response.status}`);
+  console.log('Response data:', JSON.stringify(response.data, null, 2));
+
+  // Проверяем, является ли ответ ошибкой (даже при статусе 200)
+  if (response.data && response.data.error) {
+    console.error('Target API returned error in response body:', response.data);
+    // Определяем HTTP статус на основе типа ошибки
+    let errorStatus = 500;
+    if (response.data.error === 'ERROR_OPENAI' || response.data.details?.title?.includes('Unable to reach')) {
+      errorStatus = 502; // Bad Gateway - не можем связаться с провайдером
+    } else if (response.data.error === 'ERROR_INVALID_REQUEST') {
+      errorStatus = 400; // Bad Request
+    } else if (response.data.error === 'ERROR_AUTHENTICATION') {
+      errorStatus = 401; // Unauthorized
+    } else if (response.data.error === 'ERROR_PERMISSION') {
+      errorStatus = 403; // Forbidden
+    } else if (response.data.error === 'ERROR_NOT_FOUND') {
+      errorStatus = 404; // Not Found
+    } else if (response.data.error === 'ERROR_RATE_LIMIT') {
+      errorStatus = 429; // Too Many Requests
+    }
+
+    res.status(errorStatus).json({
+      error: {
+        message: response.data.details?.detail || response.data.details?.title || response.data.error,
+        type: response.data.error.toLowerCase().replace('error_', ''),
+        code: response.data.error
+      }
+    });
+    return false; // Указывает, что ответ уже отправлен
+  }
+
+  // Копируем важные заголовки из ответа
+  if (response.headers['content-type']) {
+    res.setHeader('Content-Type', response.headers['content-type']);
+  }
+  if (response.headers['x-request-id']) {
+    res.setHeader('X-Request-ID', response.headers['x-request-id']);
+  }
+
+  res.status(response.status).json(response.data);
+  return true; // Указывает, что ответ отправлен успешно
+}
+
 // Функция для создания заголовков для целевого API
 function createTargetHeaders(req) {
   const headers = {
@@ -208,8 +254,8 @@ function createTargetHeaders(req) {
 
   // Authorization из переменной окружения (всегда используем наш токен)
   if (AUTHORIZATION_TOKEN) {
-    headers['Authorization'] = AUTHORIZATION_TOKEN.startsWith('Bearer ') 
-      ? AUTHORIZATION_TOKEN 
+    headers['Authorization'] = AUTHORIZATION_TOKEN.startsWith('Bearer ')
+      ? AUTHORIZATION_TOKEN
       : `Bearer ${AUTHORIZATION_TOKEN}`;
   }
 
@@ -276,17 +322,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     console.log('Request headers:', JSON.stringify(headers, null, 2));
 
     const response = await axios.post(targetUrl, requestBody, { headers });
-    console.log(`Response status: ${response.status}`);
-    
-    // Копируем важные заголовки из ответа
-    if (response.headers['content-type']) {
-      res.setHeader('Content-Type', response.headers['content-type']);
-    }
-    if (response.headers['x-request-id']) {
-      res.setHeader('X-Request-ID', response.headers['x-request-id']);
-    }
-    
-    res.status(response.status).json(response.data);
+    return processTargetResponse(response, res);
   } catch (error) {
     console.error('Error proxying chat completions:', error.message);
     if (error.response) {
@@ -315,7 +351,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 app.post('/v1/completions', async (req, res) => {
   try {
     const agentAccessId = getAgentAccessId();
-    
+
     if (!agentAccessId) {
       return res.status(500).json({
         error: {
@@ -331,7 +367,7 @@ app.post('/v1/completions', async (req, res) => {
     console.log(`Proxying to: ${targetUrl}`);
 
     const response = await axios.post(targetUrl, req.body, { headers });
-    res.status(response.status).json(response.data);
+    return processTargetResponse(response, res);
   } catch (error) {
     console.error('Error proxying completions:', error.message);
     
@@ -352,7 +388,7 @@ app.post('/v1/completions', async (req, res) => {
 app.get('/v1/models', async (req, res) => {
   try {
     const agentAccessId = getAgentAccessId();
-    
+
     if (!agentAccessId) {
       return res.status(500).json({
         error: {
@@ -368,7 +404,7 @@ app.get('/v1/models', async (req, res) => {
     console.log(`Proxying to: ${targetUrl}`);
 
     const response = await axios.get(targetUrl, { headers });
-    res.status(response.status).json(response.data);
+    return processTargetResponse(response, res);
   } catch (error) {
     console.error('Error proxying models:', error.message);
     
@@ -523,17 +559,7 @@ app.post('/v1/responses', async (req, res) => {
     console.log('Request headers:', JSON.stringify(headers, null, 2));
 
     const response = await axios.post(targetUrl, chatCompletionsBody, { headers });
-    console.log(`Response status: ${response.status}`);
-
-    // Копируем важные заголовки из ответа
-    if (response.headers['content-type']) {
-      res.setHeader('Content-Type', response.headers['content-type']);
-    }
-    if (response.headers['x-request-id']) {
-      res.setHeader('X-Request-ID', response.headers['x-request-id']);
-    }
-
-    res.status(response.status).json(response.data);
+    return processTargetResponse(response, res);
   } catch (error) {
     console.error('Error proxying responses:', error.message);
     if (error.response) {
