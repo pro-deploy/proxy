@@ -23,12 +23,28 @@ const AUTHORIZATION_TOKEN = process.env.AUTHORIZATION_TOKEN || process.env.AUTH_
 // x-proxy-source заголовок
 const PROXY_SOURCE = process.env.PROXY_SOURCE || 'openai-proxy';
 
+// Middleware для CORS
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 // Middleware для парсинга JSON
 app.use(express.json());
 
 // Middleware для логирования
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  console.log('Headers:', JSON.stringify(req.headers, null, 2));
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log('Body:', JSON.stringify(req.body, null, 2));
+  }
   next();
 });
 
@@ -38,12 +54,31 @@ function getAgentAccessId() {
 }
 
 // Функция для создания заголовков для целевого API
-function createTargetHeaders() {
+function createTargetHeaders(req) {
   const headers = {
     'Content-Type': 'application/json',
   };
 
-  // Authorization из переменной окружения
+  // Копируем полезные заголовки от клиента (кроме Authorization, Host, Content-Length)
+  const headersToForward = [
+    'user-agent',
+    'x-request-id',
+    'x-forwarded-for',
+    'x-forwarded-proto',
+    'accept',
+    'accept-encoding',
+    'accept-language',
+    'referer',
+    'origin'
+  ];
+
+  headersToForward.forEach(headerName => {
+    if (req.headers[headerName]) {
+      headers[headerName] = req.headers[headerName];
+    }
+  });
+
+  // Authorization из переменной окружения (всегда используем наш токен)
   if (AUTHORIZATION_TOKEN) {
     headers['Authorization'] = AUTHORIZATION_TOKEN.startsWith('Bearer ') 
       ? AUTHORIZATION_TOKEN 
@@ -71,17 +106,36 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/chat/completions`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     console.log(`Proxying to: ${targetUrl}`);
+    console.log('Request headers:', JSON.stringify(headers, null, 2));
 
     const response = await axios.post(targetUrl, req.body, { headers });
+    console.log(`Response status: ${response.status}`);
+    
+    // Копируем важные заголовки из ответа
+    if (response.headers['content-type']) {
+      res.setHeader('Content-Type', response.headers['content-type']);
+    }
+    if (response.headers['x-request-id']) {
+      res.setHeader('X-Request-ID', response.headers['x-request-id']);
+    }
+    
     res.status(response.status).json(response.data);
   } catch (error) {
     console.error('Error proxying chat completions:', error.message);
-    
     if (error.response) {
+      console.error('Response error:', error.response.status, error.response.data);
       res.status(error.response.status).json(error.response.data);
+    } else if (error.request) {
+      console.error('Request error:', error.request);
+      res.status(502).json({
+        error: {
+          message: 'Bad Gateway - Unable to reach target API',
+          type: 'server_error'
+        }
+      });
     } else {
       res.status(500).json({
         error: {
@@ -108,7 +162,7 @@ app.post('/v1/completions', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/completions`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     console.log(`Proxying to: ${targetUrl}`);
 
@@ -145,7 +199,7 @@ app.get('/v1/models', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/models`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     console.log(`Proxying to: ${targetUrl}`);
 
@@ -182,7 +236,7 @@ app.post('/v1/responses', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/responses`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     console.log(`Proxying to: ${targetUrl}`);
 
@@ -220,7 +274,7 @@ app.get('/v1/responses/:response_id', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/responses/${response_id}`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     // Добавляем query параметры если есть
     const queryParams = new URLSearchParams(req.query).toString();
@@ -262,7 +316,7 @@ app.delete('/v1/responses/:response_id', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/responses/${response_id}`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     console.log(`Proxying to: ${targetUrl}`);
 
@@ -337,7 +391,7 @@ app.post('/v1/conversations', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/conversations`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     console.log(`Proxying to: ${targetUrl}`);
 
@@ -375,7 +429,7 @@ app.get('/v1/conversations/:conversation_id', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/conversations/${conversation_id}`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     console.log(`Proxying to: ${targetUrl}`);
 
@@ -412,7 +466,7 @@ app.post('/v1/conversations/:conversation_id', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/conversations/${conversation_id}`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     console.log(`Proxying to: ${targetUrl}`);
 
@@ -449,7 +503,7 @@ app.delete('/v1/conversations/:conversation_id', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/conversations/${conversation_id}`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     console.log(`Proxying to: ${targetUrl}`);
 
@@ -487,7 +541,7 @@ app.get('/v1/conversations/:conversation_id/items', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/conversations/${conversation_id}/items`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     const queryParams = new URLSearchParams(req.query).toString();
     const fullUrl = queryParams ? `${targetUrl}?${queryParams}` : targetUrl;
@@ -527,7 +581,7 @@ app.post('/v1/conversations/:conversation_id/items', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/conversations/${conversation_id}/items`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     const queryParams = new URLSearchParams(req.query).toString();
     const fullUrl = queryParams ? `${targetUrl}?${queryParams}` : targetUrl;
@@ -568,7 +622,7 @@ app.get('/v1/conversations/:conversation_id/items/:item_id', async (req, res) =>
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/conversations/${conversation_id}/items/${item_id}`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     const queryParams = new URLSearchParams(req.query).toString();
     const fullUrl = queryParams ? `${targetUrl}?${queryParams}` : targetUrl;
@@ -608,7 +662,7 @@ app.delete('/v1/conversations/:conversation_id/items/:item_id', async (req, res)
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/conversations/${conversation_id}/items/${item_id}`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     console.log(`Proxying to: ${targetUrl}`);
 
@@ -627,6 +681,39 @@ app.delete('/v1/conversations/:conversation_id/items/:item_id', async (req, res)
         }
       });
     }
+  }
+});
+
+// Обработчик для неизвестных эндпоинтов (для отладки)
+app.use((req, res, next) => {
+  if (req.path !== '/health' && req.path !== '/') {
+    console.warn(`⚠️  Unknown endpoint: ${req.method} ${req.path}`);
+    console.warn('Headers:', JSON.stringify(req.headers, null, 2));
+    res.status(404).json({
+      error: {
+        message: `Endpoint not found: ${req.method} ${req.path}`,
+        type: 'invalid_request_error',
+        available_endpoints: [
+          'POST /v1/chat/completions',
+          'POST /v1/completions',
+          'GET /v1/models',
+          'POST /v1/responses',
+          'GET /v1/responses/:response_id',
+          'DELETE /v1/responses/:response_id',
+          'POST /v1/responses/:response_id/cancel',
+          'POST /v1/conversations',
+          'GET /v1/conversations/:conversation_id',
+          'POST /v1/conversations/:conversation_id',
+          'DELETE /v1/conversations/:conversation_id',
+          'GET /v1/conversations/:conversation_id/items',
+          'POST /v1/conversations/:conversation_id/items',
+          'GET /v1/conversations/:conversation_id/items/:item_id',
+          'DELETE /v1/conversations/:conversation_id/items/:item_id'
+        ]
+      }
+    });
+  } else {
+    next();
   }
 });
 
