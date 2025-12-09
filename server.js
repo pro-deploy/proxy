@@ -354,7 +354,7 @@ app.post('/v1/responses/:response_id/cancel', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/responses/${response_id}/cancel`;
-    const headers = createTargetHeaders();
+    const headers = createTargetHeaders(req);
 
     console.log(`Proxying to: ${targetUrl}`);
 
@@ -682,6 +682,15 @@ app.delete('/v1/conversations/:conversation_id/items/:item_id', async (req, res)
       });
     }
   }
+});
+
+// Обработчик для favicon файлов (тихо игнорируем)
+app.get('/favicon.ico', (req, res) => {
+  res.status(204).end();
+});
+
+app.get('/favicon.png', (req, res) => {
+  res.status(204).end();
 });
 
 // Обработчик для неизвестных эндпоинтов (для отладки)
