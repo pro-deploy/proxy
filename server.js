@@ -23,6 +23,9 @@ const AUTHORIZATION_TOKEN = process.env.AUTHORIZATION_TOKEN || process.env.AUTH_
 // x-proxy-source заголовок
 const PROXY_SOURCE = process.env.PROXY_SOURCE || 'openai-proxy';
 
+// Принудительная модель для Timeweb API (заменяет любую модель из запроса)
+const FORCED_MODEL = process.env.FORCED_MODEL || 'grok-code-fast-1';
+
 // Middleware для CORS
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -108,10 +111,17 @@ app.post('/v1/chat/completions', async (req, res) => {
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/chat/completions`;
     const headers = createTargetHeaders(req);
 
+    // Заменяем модель на принудительную
+    const requestBody = { ...req.body };
+    if (requestBody.model) {
+      console.log(`Replacing model "${requestBody.model}" with "${FORCED_MODEL}"`);
+      requestBody.model = FORCED_MODEL;
+    }
+
     console.log(`Proxying to: ${targetUrl}`);
     console.log('Request headers:', JSON.stringify(headers, null, 2));
 
-    const response = await axios.post(targetUrl, req.body, { headers });
+    const response = await axios.post(targetUrl, requestBody, { headers });
     console.log(`Response status: ${response.status}`);
     
     // Копируем важные заголовки из ответа
@@ -164,9 +174,16 @@ app.post('/v1/completions', async (req, res) => {
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/completions`;
     const headers = createTargetHeaders(req);
 
+    // Заменяем модель на принудительную
+    const requestBody = { ...req.body };
+    if (requestBody.model) {
+      console.log(`Replacing model "${requestBody.model}" with "${FORCED_MODEL}"`);
+      requestBody.model = FORCED_MODEL;
+    }
+
     console.log(`Proxying to: ${targetUrl}`);
 
-    const response = await axios.post(targetUrl, req.body, { headers });
+    const response = await axios.post(targetUrl, requestBody, { headers });
     res.status(response.status).json(response.data);
   } catch (error) {
     console.error('Error proxying completions:', error.message);
@@ -761,6 +778,7 @@ app.listen(PORT, HOST, () => {
   console.log(`📍 Базовый URL: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
   console.log(`🎯 Целевой API: ${TARGET_API_BASE}`);
   console.log(`🔑 Agent Access ID: ${AGENT_ACCESS_ID || 'не задан (установите AGENT_ACCESS_ID в переменных окружения)'}`);
+  console.log(`🤖 Принудительная модель: ${FORCED_MODEL} (все запросы будут использовать эту модель)`);
   console.log(`✨ Все запросы в формате ChatGPT будут автоматически проксироваться на Timeweb`);
 });
 
