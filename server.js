@@ -23,8 +23,112 @@ const AUTHORIZATION_TOKEN = process.env.AUTHORIZATION_TOKEN || process.env.AUTH_
 // x-proxy-source заголовок
 const PROXY_SOURCE = process.env.PROXY_SOURCE || 'openai-proxy';
 
-// Принудительная модель для Timeweb API (заменяет любую модель из запроса)
+// Принудительная модель (если задана в переменных окружения)
 const FORCED_MODEL = process.env.FORCED_MODEL || 'grok-code-fast-1';
+
+// Функция для нормализации и валидации тела запроса chat completions
+function normalizeChatCompletionsBody(body) {
+  if (!body || typeof body !== 'object') {
+    throw new Error('Request body must be an object');
+  }
+
+  const normalized = { ...body };
+
+  // Валидация и нормализация messages
+  if (!normalized.messages) {
+    throw new Error('messages field is required');
+  }
+  
+  if (!Array.isArray(normalized.messages)) {
+    throw new Error('messages must be an array');
+  }
+  
+  if (normalized.messages.length === 0) {
+    throw new Error('messages must contain at least 1 element');
+  }
+
+  // Валидация и нормализация tools (если присутствуют)
+  if (normalized.tools !== undefined && normalized.tools !== null) {
+    // Если tools не является массивом, пытаемся преобразовать или выбрасываем ошибку
+    if (!Array.isArray(normalized.tools)) {
+      // Если это объект, пытаемся обернуть в массив (на случай если пришел один tool)
+      if (typeof normalized.tools === 'object') {
+        console.warn('tools is not an array, attempting to convert');
+        normalized.tools = [normalized.tools];
+      } else {
+        throw new Error('tools must be an array');
+      }
+    }
+    
+    // Проверяем структуру каждого tool
+    normalized.tools = normalized.tools.map((tool, index) => {
+      if (!tool || typeof tool !== 'object') {
+        throw new Error(`tools[${index}] must be an object`);
+      }
+      
+      // Если tool уже имеет правильную структуру с type и function
+      if (tool.type === 'function' && tool.function) {
+        // Проверяем, что function является объектом
+        if (typeof tool.function !== 'object' || Array.isArray(tool.function)) {
+          throw new Error(`tools[${index}].function must be an object`);
+        }
+        
+        // Убеждаемся, что function имеет правильную структуру
+        if (!tool.function.name || typeof tool.function.name !== 'string') {
+          throw new Error(`tools[${index}].function.name must be a string`);
+        }
+        
+        // Нормализуем function объект, сохраняя все поля
+        return {
+          type: 'function',
+          function: {
+            name: tool.function.name,
+            description: tool.function.description || '',
+            parameters: tool.function.parameters || {}
+          }
+        };
+      }
+      
+      // Если tool имеет только function без type, добавляем type
+      if (tool.function && !tool.type) {
+        if (typeof tool.function !== 'object' || Array.isArray(tool.function)) {
+          throw new Error(`tools[${index}].function must be an object`);
+        }
+        
+        if (!tool.function.name || typeof tool.function.name !== 'string') {
+          throw new Error(`tools[${index}].function.name must be a string`);
+        }
+        
+        return {
+          type: 'function',
+          function: {
+            name: tool.function.name,
+            description: tool.function.description || '',
+            parameters: tool.function.parameters || {}
+          }
+        };
+      }
+      
+      // Если tool не имеет ни type, ни function, это может быть ошибка
+      if (!tool.type && !tool.function) {
+        throw new Error(`tools[${index}] must have either type="function" or a function property`);
+      }
+      
+      // Возвращаем tool как есть, если он уже в правильном формате
+      return tool;
+    });
+  }
+
+  // Замена модели, если задана принудительная модель
+  if (FORCED_MODEL && normalized.model) {
+    console.log(`Replacing model "${normalized.model}" with "${FORCED_MODEL}"`);
+    normalized.model = FORCED_MODEL;
+  } else if (FORCED_MODEL && !normalized.model) {
+    normalized.model = FORCED_MODEL;
+  }
+
+  return normalized;
+}
 
 // Middleware для CORS
 app.use((req, res, next) => {
@@ -108,15 +212,38 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
     }
 
+    // Логируем входящее тело запроса для диагностики
+    console.log('Incoming request body:', JSON.stringify(req.body, null, 2));
+    console.log('Incoming request body type:', typeof req.body);
+    if (req.body.messages) {
+      console.log('Messages type:', Array.isArray(req.body.messages) ? 'array' : typeof req.body.messages);
+      console.log('Messages length:', Array.isArray(req.body.messages) ? req.body.messages.length : 'N/A');
+    }
+    if (req.body.tools) {
+      console.log('Tools type:', Array.isArray(req.body.tools) ? 'array' : typeof req.body.tools);
+      console.log('Tools length:', Array.isArray(req.body.tools) ? req.body.tools.length : 'N/A');
+      if (Array.isArray(req.body.tools) && req.body.tools.length > 0) {
+        console.log('First tool structure:', JSON.stringify(req.body.tools[0], null, 2));
+      }
+    }
+
+    // Нормализация и валидация тела запроса
+    let requestBody;
+    try {
+      requestBody = normalizeChatCompletionsBody(req.body);
+      console.log('Normalized request body:', JSON.stringify(requestBody, null, 2));
+    } catch (validationError) {
+      console.error('Validation error:', validationError.message);
+      return res.status(400).json({
+        error: {
+          message: validationError.message,
+          type: 'invalid_request_error'
+        }
+      });
+    }
+
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/chat/completions`;
     const headers = createTargetHeaders(req);
-
-    // Заменяем модель на принудительную
-    const requestBody = { ...req.body };
-    if (requestBody.model) {
-      console.log(`Replacing model "${requestBody.model}" with "${FORCED_MODEL}"`);
-      requestBody.model = FORCED_MODEL;
-    }
 
     console.log(`Proxying to: ${targetUrl}`);
     console.log('Request headers:', JSON.stringify(headers, null, 2));
@@ -174,16 +301,9 @@ app.post('/v1/completions', async (req, res) => {
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/completions`;
     const headers = createTargetHeaders(req);
 
-    // Заменяем модель на принудительную
-    const requestBody = { ...req.body };
-    if (requestBody.model) {
-      console.log(`Replacing model "${requestBody.model}" with "${FORCED_MODEL}"`);
-      requestBody.model = FORCED_MODEL;
-    }
-
     console.log(`Proxying to: ${targetUrl}`);
 
-    const response = await axios.post(targetUrl, requestBody, { headers });
+    const response = await axios.post(targetUrl, req.body, { headers });
     res.status(response.status).json(response.data);
   } catch (error) {
     console.error('Error proxying completions:', error.message);
@@ -371,7 +491,7 @@ app.post('/v1/responses/:response_id/cancel', async (req, res) => {
     }
 
     const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/responses/${response_id}/cancel`;
-    const headers = createTargetHeaders(req);
+    const headers = createTargetHeaders();
 
     console.log(`Proxying to: ${targetUrl}`);
 
@@ -701,15 +821,6 @@ app.delete('/v1/conversations/:conversation_id/items/:item_id', async (req, res)
   }
 });
 
-// Обработчик для favicon файлов (тихо игнорируем)
-app.get('/favicon.ico', (req, res) => {
-  res.status(204).end();
-});
-
-app.get('/favicon.png', (req, res) => {
-  res.status(204).end();
-});
-
 // Обработчик для неизвестных эндпоинтов (для отладки)
 app.use((req, res, next) => {
   if (req.path !== '/health' && req.path !== '/') {
@@ -778,7 +889,6 @@ app.listen(PORT, HOST, () => {
   console.log(`📍 Базовый URL: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
   console.log(`🎯 Целевой API: ${TARGET_API_BASE}`);
   console.log(`🔑 Agent Access ID: ${AGENT_ACCESS_ID || 'не задан (установите AGENT_ACCESS_ID в переменных окружения)'}`);
-  console.log(`🤖 Принудительная модель: ${FORCED_MODEL} (все запросы будут использовать эту модель)`);
   console.log(`✨ Все запросы в формате ChatGPT будут автоматически проксироваться на Timeweb`);
 });
 
