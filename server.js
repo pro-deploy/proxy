@@ -36,11 +36,12 @@ function normalizeChatCompletionsBody(body) {
 
   // Валидация и нормализация messages
   if (!normalized.messages) {
-    throw new Error('messages field is required');
+    const availableFields = Object.keys(normalized).join(', ');
+    throw new Error(`messages field is required. Available fields in request: ${availableFields || 'none'}`);
   }
   
   if (!Array.isArray(normalized.messages)) {
-    throw new Error('messages must be an array');
+    throw new Error(`messages must be an array, but got ${typeof normalized.messages}`);
   }
   
   if (normalized.messages.length === 0) {
@@ -142,8 +143,26 @@ app.use((req, res, next) => {
   next();
 });
 
-// Middleware для парсинга JSON
-app.use(express.json());
+// Middleware для парсинга JSON с обработкой ошибок
+app.use(express.json({
+  limit: '10mb',
+  strict: true
+}));
+
+// Обработчик ошибок парсинга JSON
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    console.error('❌ JSON parsing error:', err.message);
+    return res.status(400).json({
+      error: {
+        message: 'Invalid JSON in request body',
+        type: 'invalid_request_error',
+        details: err.message
+      }
+    });
+  }
+  next(err);
+});
 
 // Middleware для логирования
 app.use((req, res, next) => {
@@ -151,6 +170,8 @@ app.use((req, res, next) => {
   console.log('Headers:', JSON.stringify(req.headers, null, 2));
   if (req.body && Object.keys(req.body).length > 0) {
     console.log('Body:', JSON.stringify(req.body, null, 2));
+  } else if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+    console.warn('⚠️  WARNING: Request body is empty or not parsed');
   }
   next();
 });
@@ -215,10 +236,15 @@ app.post('/v1/chat/completions', async (req, res) => {
     // Логируем входящее тело запроса для диагностики
     console.log('Incoming request body:', JSON.stringify(req.body, null, 2));
     console.log('Incoming request body type:', typeof req.body);
+    console.log('Request body keys:', Object.keys(req.body || {}));
+    
     if (req.body.messages) {
       console.log('Messages type:', Array.isArray(req.body.messages) ? 'array' : typeof req.body.messages);
       console.log('Messages length:', Array.isArray(req.body.messages) ? req.body.messages.length : 'N/A');
+    } else {
+      console.warn('⚠️  WARNING: messages field is missing in request body');
     }
+    
     if (req.body.tools) {
       console.log('Tools type:', Array.isArray(req.body.tools) ? 'array' : typeof req.body.tools);
       console.log('Tools length:', Array.isArray(req.body.tools) ? req.body.tools.length : 'N/A');
@@ -233,7 +259,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       requestBody = normalizeChatCompletionsBody(req.body);
       console.log('Normalized request body:', JSON.stringify(requestBody, null, 2));
     } catch (validationError) {
-      console.error('Validation error:', validationError.message);
+      console.error('❌ Validation error:', validationError.message);
+      console.error('Request body that failed validation:', JSON.stringify(req.body, null, 2));
       return res.status(400).json({
         error: {
           message: validationError.message,
