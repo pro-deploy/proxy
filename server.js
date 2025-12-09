@@ -385,11 +385,92 @@ app.get('/v1/models', async (req, res) => {
   }
 });
 
-// Прокси для /v1/responses (POST) -> /api/v1/cloud-ai/agents/{agent_access_id}/v1/responses
+// Функция для конвертации Responses API формата в Chat Completions API формат
+function convertResponsesToChatCompletions(responsesBody) {
+  const chatCompletionsBody = { ...responsesBody };
+
+  // Конвертируем input в messages
+  if (responsesBody.input) {
+    if (typeof responsesBody.input === 'string') {
+      // Если input - строка, создаем сообщение от пользователя
+      chatCompletionsBody.messages = [
+        {
+          role: 'user',
+          content: responsesBody.input
+        }
+      ];
+    } else if (Array.isArray(responsesBody.input)) {
+      // Если input - массив, используем его как messages
+      chatCompletionsBody.messages = responsesBody.input;
+    } else if (typeof responsesBody.input === 'object') {
+      // Если input - объект, пробуем извлечь текстовое содержимое
+      chatCompletionsBody.messages = [
+        {
+          role: 'user',
+          content: JSON.stringify(responsesBody.input)
+        }
+      ];
+    }
+  }
+
+  // Конвертируем instructions в system message, если есть
+  if (responsesBody.instructions && !chatCompletionsBody.messages) {
+    chatCompletionsBody.messages = [
+      {
+        role: 'system',
+        content: responsesBody.instructions
+      }
+    ];
+  } else if (responsesBody.instructions && chatCompletionsBody.messages) {
+    // Добавляем instructions как system message в начало
+    chatCompletionsBody.messages.unshift({
+      role: 'system',
+      content: responsesBody.instructions
+    });
+  }
+
+  // Удаляем поля, специфичные для Responses API
+  delete chatCompletionsBody.input;
+  delete chatCompletionsBody.instructions;
+  delete chatCompletionsBody.previous_response_id;
+  delete chatCompletionsBody.conversation;
+  delete chatCompletionsBody.include;
+  delete chatCompletionsBody.safety_identifier;
+  delete chatCompletionsBody.prompt_cache_key;
+  delete chatCompletionsBody.prompt;
+  delete chatCompletionsBody.reasoning;
+
+  // Убеждаемся, что есть модель
+  if (!chatCompletionsBody.model) {
+    chatCompletionsBody.model = FORCED_MODEL || 'gpt-4';
+  }
+
+  return chatCompletionsBody;
+}
+
+// Функция для валидации тела запроса responses
+function validateResponsesBody(body) {
+  if (!body || typeof body !== 'object') {
+    throw new Error('Request body must be an object');
+  }
+
+  const availableFields = Object.keys(body).join(', ');
+  console.log('Available fields in responses request:', availableFields);
+
+  // Для responses API поле input является основным (вместо messages)
+  // Но также может быть instructions и другие поля
+  if (!body.input && !body.instructions) {
+    throw new Error(`Either 'input' or 'instructions' field is required. Available fields in request: ${availableFields || 'none'}`);
+  }
+
+  return body;
+}
+
+// Прокси для /v1/responses (POST) - конвертируем в chat completions
 app.post('/v1/responses', async (req, res) => {
   try {
     const agentAccessId = getAgentAccessId();
-    
+
     if (!agentAccessId) {
       return res.status(500).json({
         error: {
@@ -399,18 +480,73 @@ app.post('/v1/responses', async (req, res) => {
       });
     }
 
-    const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/responses`;
+    // Логируем входящее тело запроса для диагностики
+    console.log('Incoming responses request body:', JSON.stringify(req.body, null, 2));
+    console.log('Request body keys:', Object.keys(req.body || {}));
+
+    // Валидация тела запроса
+    let responsesBody;
+    try {
+      responsesBody = validateResponsesBody(req.body);
+      console.log('Validated responses request body');
+    } catch (validationError) {
+      console.error('❌ Responses validation error:', validationError.message);
+      console.error('Request body that failed validation:', JSON.stringify(req.body, null, 2));
+      return res.status(400).json({
+        error: {
+          message: validationError.message,
+          type: 'invalid_request_error'
+        }
+      });
+    }
+
+    // Конвертируем Responses API формат в Chat Completions API формат
+    let chatCompletionsBody;
+    try {
+      chatCompletionsBody = convertResponsesToChatCompletions(responsesBody);
+      console.log('Converted to chat completions format:', JSON.stringify(chatCompletionsBody, null, 2));
+    } catch (conversionError) {
+      console.error('❌ Conversion error:', conversionError.message);
+      return res.status(400).json({
+        error: {
+          message: `Failed to convert responses format to chat completions: ${conversionError.message}`,
+          type: 'invalid_request_error'
+        }
+      });
+    }
+
+    // Проксируем на chat completions эндпоинт
+    const targetUrl = `${TARGET_API_BASE}/api/v1/cloud-ai/agents/${agentAccessId}/v1/chat/completions`;
     const headers = createTargetHeaders(req);
 
-    console.log(`Proxying to: ${targetUrl}`);
+    console.log(`Proxying converted responses to chat completions: ${targetUrl}`);
+    console.log('Request headers:', JSON.stringify(headers, null, 2));
 
-    const response = await axios.post(targetUrl, req.body, { headers });
+    const response = await axios.post(targetUrl, chatCompletionsBody, { headers });
+    console.log(`Response status: ${response.status}`);
+
+    // Копируем важные заголовки из ответа
+    if (response.headers['content-type']) {
+      res.setHeader('Content-Type', response.headers['content-type']);
+    }
+    if (response.headers['x-request-id']) {
+      res.setHeader('X-Request-ID', response.headers['x-request-id']);
+    }
+
     res.status(response.status).json(response.data);
   } catch (error) {
     console.error('Error proxying responses:', error.message);
-    
     if (error.response) {
+      console.error('Response error:', error.response.status, error.response.data);
       res.status(error.response.status).json(error.response.data);
+    } else if (error.request) {
+      console.error('Request error:', error.request);
+      res.status(502).json({
+        error: {
+          message: 'Bad Gateway - Unable to reach target API',
+          type: 'server_error'
+        }
+      });
     } else {
       res.status(500).json({
         error: {
